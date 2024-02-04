@@ -1,13 +1,13 @@
 #!/bin/python3
-#REQUIREMENTS: pip install ytmusicapi, yt-dlp, sanitize_filename, sty
+#REQUIREMENTS: pip install ytmusicapi yt-dlp sanitize_filename sty
+#run ytmusicapi oauth ro get oauth.json
+#version 0.2
 
 import json, sys, os, subprocess, time, random, datetime
 from sanitize_filename import sanitize
 from sty import fg, rs
 from ytmusicapi import YTMusic
-ytm = YTMusic("oauth.json")
 
-start = time.time()
 def dumpr(r): #dump pretty json to file
   o = json.dumps(r, indent=2)
   with open("temp.json", "w") as f:
@@ -21,10 +21,18 @@ def delay(s=10): #delay plus or minus 50%
   b = int(s*1.5)
   time.sleep(random.randint(a,b))
 
+start = time.time()
 if len(sys.argv) == 1:
   print(f'USAGE: python3 {sys.argv[0]} "artist"')
   sys.exit()
 
+# ~ if not os.path.exists("oauth.json"):
+  # ~ u = subprocess.check_call("ytmusicapi oauth", shell=True)
+  # ~ if u != 0:
+    # ~ print("ERROR:, could not get oauth.  Try again?")
+    # ~ sys.exit()
+
+ytm = YTMusic("oauth.json")
 r = ytm.search(sys.argv[1], filter="artists")
 o = json.dumps(r, indent=2)
 
@@ -39,6 +47,7 @@ discography_id = r["albums"]["browseId"]
 discography_params = r["albums"]["params"]
 
 r = ytm.get_artist_albums(discography_id, discography_params)
+num_albums = len(r)
 errors = 0
 b = 0
 c = 0
@@ -49,7 +58,7 @@ for a in r: #for each album in dicography
   path = f"music/{artist_dir}/{album_dir}/"
   os.makedirs(os.path.dirname(path), exist_ok=True)
   b = b + 1
-  print(b, '--', album_title)
+  print(f"{b}/{num_albums} -- {album_title}")
   
   s = ytm.get_album(album_id)
   tracks = s["trackCount"]
