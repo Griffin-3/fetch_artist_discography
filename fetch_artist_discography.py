@@ -29,11 +29,11 @@ def delay(s=10): #delay plus or minus 50%
 #=====main()
 start = time.time()
 parser = argparse.ArgumentParser(description='Download complete discographies from youtube music')
-parser.add_argument('artists', metavar='ARTIST', type=str, nargs='*', help='Artist to download')
+parser.add_argument('artists', metavar='ARTIST', type=str, nargs='*', help='artist to download')
 # ~ parser.add_argument('artist name', metavar='ARTIST', type=str, nargs='+', help='artist to download')
-parser.add_argument('-f', '--file', metavar='FILE', type=str, default='', help='Load list of artists from file')
-parser.add_argument('-o', '--output-dir', metavar='PATH', type=str, default='music', help='Store discographies in specified directory')
-parser.add_argument('--live', action='store_true', help='Include live albums')
+parser.add_argument('-f', '--file', metavar='FILE', type=str, default='', help='load list of artists from file, one artist per line')
+parser.add_argument('-o', '--output-dir', metavar='PATH', type=str, default='music', help='store discographies in specified directory')
+parser.add_argument('--live', action='store_true', help='include live albums')
 args = parser.parse_args()
 
 if args.file:
@@ -71,9 +71,11 @@ def grab_discography(search):
 
   r = ytm.get_artist(artist_id)
   discography_id = r["albums"]["browseId"]
-  discography_params = r["albums"]["params"]
-
-  r = ytm.get_artist_albums(discography_id, discography_params)
+  try:
+    discography_params = r["albums"]["params"]
+    r = ytm.get_artist_albums(discography_id, discography_params)
+  except:
+    r = r['albums']['results'] #type 2 discography
 
   num_albums = len(r)
   errors = 0
