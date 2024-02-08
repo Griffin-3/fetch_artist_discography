@@ -2,9 +2,9 @@
 #REQUIREMENTS: pip install ytmusicapi yt-dlp sanitize_filename sty
 #requires apt install ffmpeg
 #run ytmusicapi oauth to get oauth.json
-#version 0.4
+#version 0.6
 
-import json, sys, os, subprocess, time, random, datetime, argparse
+import json, sys, os, subprocess, time, random, datetime, argparse, re
 from sanitize_filename import sanitize
 from sty import fg, rs
 from ytmusicapi import YTMusic
@@ -26,6 +26,58 @@ def delay(s=10): #delay plus or minus 50%
   b = int(s*1.5)
   time.sleep(random.randint(a,b))
 
+def prompt_albums(r): # Propmt user which albums should be skipped.
+  # Print numbered list
+  # Save album number to indexed_id with browseId
+  # Parse input to list of numbers to skip_list
+  # Loop through albums again and pop ones where browseId matches associated number in skip_list
+  print("Which albums should be skipped?")
+  
+  indexed_id = []
+  to_skip = []
+
+  num_albums = 1
+  for a in r:
+    album_id = a["browseId"]
+    album_title = a["title"]
+    print(f"  {num_albums:2d} - {album_title}")
+    indexed_id.insert(num_albums, album_id) # ensure list is in order, I don't trust python loops to be ordered
+    num_albums += 1
+  
+  print(f"Enter numbers to skip seperated by spaces ({1}-{num_albums-1}):")
+  print(f"(Enter 0 or leave blank to not skip any albums.)")
+  skip_str = str(input())
+  skip_nums = re.compile('-?\d+').findall(skip_str)
+
+  if len(skip_nums) == 0 or int(skip_nums[0]) == 0:
+    print("Not skipping any albums...")
+    return r
+
+  # sanity check the skip list.
+  for n in skip_nums:
+    if int(n) < 1 or int(n) > num_albums-1:
+      print(f"STOP == Invalid album number: {n}")
+      sys.exit()
+
+  # confirm skipped albums and add to to_skip list
+  skip_str = ""
+  for i in skip_nums:
+    to_skip.append(indexed_id[i-1])
+    skip_str += " " + str(i)
+
+  print(f"Skipping {len(to_skip)} albums numbered:{skip_str}...")
+
+  out_albums = []
+  for a in r:
+    if not (a["browseId"] in to_skip):
+      out_albums.append(a)
+
+  # print("New album list: "+ str(out_albums))
+  return out_albums
+
+
+    
+
 #=====main()
 start = time.time()
 parser = argparse.ArgumentParser(description='Download complete discographies from youtube music')
@@ -34,6 +86,7 @@ parser.add_argument('artists', metavar='ARTIST', type=str, nargs='*', help='arti
 parser.add_argument('-f', '--file', metavar='FILE', type=str, default='', help='load list of artists from file, one artist per line')
 parser.add_argument('-o', '--output-dir', metavar='PATH', type=str, default='music', help='store discographies in specified directory')
 parser.add_argument('--live', action='store_true', help='include live albums')
+parser.add_argument('-s', '--skip-albums', action='store_true', help='prompt which albums to skip')
 args = parser.parse_args()
 
 if args.file:
@@ -48,7 +101,7 @@ if args.output_dir[-1] == "/":
   args.output_dir = args.output_dir[0:-1]
 if args.live:
   pass #=====DEBUG implement
-  
+
 if not os.path.exists("oauth.json"):
   print("cannot find oauth.json.  Please run\nytmusicapi oauth\non the command line to generate the file.")
   sys.exit()
@@ -77,9 +130,13 @@ def grab_discography(search):
   except:
     r = r['albums']['results'] #type 2 discography
 
-  num_albums = len(r)
+  if args.skip_albums:
+    r = prompt_albums(r)
+  
   errors = 0
   b = 0
+  num_albums = len(r)
+
   for a in r: #for each album in dicography
     ca = ca + 1
     album_id = a["browseId"]
@@ -139,5 +196,5 @@ for artist in artists:
 end = time.time()
 elapsed = int(end - start)
 hms = str(datetime.timedelta(seconds=(elapsed)))
-per_hour = int ((3600 / elapsed) * c)
+per_hour = int((3600 / elapsed) * c) if elapsed != 0 else 0
 print(f"=== {fg.li_blue}DONE{fg.rs} {ca} albums; {c} songs in {hms}; {per_hour} songs/hour")
