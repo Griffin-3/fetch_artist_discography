@@ -1,10 +1,10 @@
 #!/bin/python3
-#REQUIREMENTS: pip install ytmusicapi yt-dlp sanitize_filename sty
+#REQUIREMENTS: pip install ytmusicapi yt-dlp sanitize_filename sty music_tag
 #requires apt install ffmpeg
 #run ytmusicapi oauth to get oauth.json
-#version 0.6
+#version 0.7
 
-import json, sys, os, subprocess, time, random, datetime, argparse, re
+import json, sys, os, subprocess, time, random, datetime, argparse, re, music_tag
 from sanitize_filename import sanitize
 from sty import fg, rs
 from ytmusicapi import YTMusic
@@ -76,7 +76,36 @@ def prompt_albums(r): # Propmt user which albums should be skipped.
   return out_albums
 
 
-    
+def set_metadata( album, track, filename ): # runs after file is saved
+  tags = music_tag.load_file(filename)
+  errors = 0
+
+  tags["album"] = album["title"] # don't need to check if album["title"] exists, already used for folder name
+  if "year" in album:
+    tags["year"] = album["year"]
+  else:
+    errors += 1
+  
+  if "artists" in track and len(track["artists"]) > 0 and "name" in track["artists"][0]:
+    tags["artist"] = track["artists"][0]["name"]
+  else:
+    errors += 1
+  
+  if "title" in track:
+    tags["tracktitle"] = track["title"]
+  else:
+    errors += 1
+  
+  if "trackNumber" in track:
+    tags["tracknumber"] = track["trackNumber"]
+  else:
+    errors += 1
+  
+  tags.save()
+  if errors != 0:
+    print("Metadata Incomplete")
+
+
 
 #=====main()
 start = time.time()
@@ -87,6 +116,8 @@ parser.add_argument('-f', '--file', metavar='FILE', type=str, default='', help='
 parser.add_argument('-o', '--output-dir', metavar='PATH', type=str, default='music', help='store discographies in specified directory')
 parser.add_argument('--live', action='store_true', help='include live albums')
 parser.add_argument('-s', '--skip-albums', action='store_true', help='prompt which albums to skip')
+parser.add_argument('-t', '--skip-tags', action='store_true', help=' skip saving music tags')
+
 args = parser.parse_args()
 
 if args.file:
@@ -177,6 +208,12 @@ def grab_discography(search):
             print(f"{fg.red}FAIL{fg.rs} - {song_file}")
           else:  
             print(f"{fg.green}GOOD{fg.rs} - {song_file}")
+            if not args.skip_tags:
+              if os.path.exists(song_filename+".opus"):
+                set_metadata( a, t, song_filename+".opus" )
+              if os.path.exists(song_filename+".m4a"):
+                set_metadata( a, t, song_filename+".m4a" )
+            
             c = c + 1
           if errors == 3:
             print ("STOP == too many errors!")
