@@ -2,23 +2,22 @@
 #REQUIREMENTS: pip install ytmusicapi yt-dlp sanitize_filename sty music_tag
 #requires apt install ffmpeg
 #run ytmusicapi oauth to get oauth.json
-#version 0.7
+#version 0.8
 
-import json, sys, os, subprocess, time, random, datetime, argparse, re, music_tag
+import json, sys, os, glob, subprocess, time, random, datetime, argparse, re, music_tag
 from sanitize_filename import sanitize
 from sty import fg, rs
 from ytmusicapi import YTMusic
 from difflib import SequenceMatcher
 
-def dump_json(r): #dump pretty json to file
-  o = json.dumps(r, indent=2)
-  with open("temp.json", "w") as f:
-    f.write(o)
+def dump_json(json, filename="temp.json"): # dump json_object as pretty json to file
+  with open(filename, "w") as f:
+    f.write(json.dumps(json, indent=2))
 
-def sane_fn(f): #sanitize filename
+def sane_fn(f): #sanitize filename of illegal characters
   return sanitize(f.replace('/','-').replace('`',"'"))
 
-def similar(a, b):
+def similar(a, b): #determine similarity of two strings, float 0 to 1
   return float(SequenceMatcher(None, a, b).ratio())
   
 def delay(s=10): #delay plus or minus 50%
@@ -75,11 +74,13 @@ def prompt_albums(r): # Propmt user which albums should be skipped.
   # print("New album list: "+ str(out_albums))
   return out_albums
 
-
 def set_metadata( album, track, filename ): # runs after file is saved
   tags = music_tag.load_file(filename)
-  errors = 0
+  # ~ print("set_metadata",tags["album"])
+  if tags["album"]: 
+    return #already done
 
+  errors = 0
   tags["album"] = album["title"] # don't need to check if album["title"] exists, already used for folder name
   if "year" in album:
     tags["year"] = album["year"]
@@ -100,42 +101,57 @@ def set_metadata( album, track, filename ): # runs after file is saved
     tags["tracknumber"] = track["trackNumber"]
   else:
     errors += 1
-  
+
+  # ~ print("save metadata",tags["album"])
   tags.save()
+  print("   --- got metadata for ", filename.split("/")[-1])
+
   if errors != 0:
     print("Metadata Incomplete")
 
-
-
+def glob_exists(filename): #detect song with any extension, return filename
+  fn = glob.glob(filename+".*")
+  if fn:
+    return fn[0]
+  else:
+    return False
+  
+  
 #=====main()
 start = time.time()
 parser = argparse.ArgumentParser(description='Download complete discographies from youtube music')
 parser.add_argument('artists', metavar='ARTIST', type=str, nargs='*', help='artist to download')
-# ~ parser.add_argument('artist name', metavar='ARTIST', type=str, nargs='+', help='artist to download')
 parser.add_argument('-f', '--file', metavar='FILE', type=str, default='', help='load list of artists from file, one artist per line')
 parser.add_argument('-o', '--output-dir', metavar='PATH', type=str, default='music', help='store discographies in specified directory')
-parser.add_argument('--live', action='store_true', help='include live albums')
 parser.add_argument('-s', '--skip-albums', action='store_true', help='prompt which albums to skip')
 parser.add_argument('-t', '--skip-tags', action='store_true', help=' skip saving music tags')
+parser.add_argument('-d', '--delay', action='store_true', help='delay ~40s per album to avoid google ban')
+parser.add_argument('-l', '--live', action='store_true', help='include live albums') #===== DEBUG not implemented
+
+parser.add_argument('--fixall', action='store_true', help='fix misnumbered files, missing metadata') # ===== TEMP
 
 args = parser.parse_args()
 
-if args.file:
-  with open(args.file, "r") as f:
-    artists = f.read().split("\n")
-elif args.artists:
-  artists = args.artists
-else:
-  print("ERROR: it is required to have at least one artist or a --file artist list")
-  sys.exit()
 if args.output_dir[-1] == "/":
   args.output_dir = args.output_dir[0:-1]
-if args.live:
-  pass #=====DEBUG implement
+
+if args.fixall:                             # ===== TEMP
+  artists = os.listdir(args.output_dir)     #
+else:                                       #
+  if args.file: # require file or artist(s)
+    with open(args.file, "r") as f:
+      artists = f.read().split("\n")
+  elif args.artists:
+    artists = args.artists
+  else:
+    print("ERROR: it is required to have at least one artist or a --file artist list")
+    sys.exit()
+# refer to args.live, args.delay directly
 
 if not os.path.exists("oauth.json"):
   print("cannot find oauth.json.  Please run\nytmusicapi oauth\non the command line to generate the file.")
   sys.exit()
+
 
 def grab_discography(search):
   global c, ca, ytm
@@ -144,8 +160,7 @@ def grab_discography(search):
 
   d = similar(search.lower(), artist.lower())
   e = similar(("the "+search).lower(), artist.lower())
-  # ~ print ("d",d,"; e",e)
-  if d < 0.9 and e < 0.9: #not a good match
+  if d < 0.9 and e < 0.9: #not a good match ===== DEBUG need to log this!
     print(f'best fit for "{search}" is "{artist}": not good enough to continue')
     return
 
@@ -189,10 +204,17 @@ def grab_discography(search):
       song_title = t["title"]
       song_id = t["videoId"]
       song_sane = sane_fn(song_title)
-      song_file = f"{n} - {song_sane}"
+      song_file = f"{n+1} - {song_sane}"
+
+      f_old = glob_exists(f"{path}{n} - {song_sane}") # ===== TEMP for renaming
+      if f_old:                                       #
+        ext = f_old.split(".")[-1]                    #
+        os.rename(f_old, f"{path}{song_file}.{ext}")  #
+        print(f"RENAMED {path}{song_file}.{ext}")     #
+
       if song_id:
         song_filename = f"{path}/{song_file}"
-        if os.path.exists(song_filename+".opus") or os.path.exists(song_filename+".m4a"):
+        if glob_exists(song_filename):
           print(f"{fg.li_blue}SKIPPED{fg.rs}")
         else:
           cmd = f'yt-dlp -q -x -P "{path}" -o "{song_file}" -- {song_id} '
@@ -208,28 +230,30 @@ def grab_discography(search):
             print(f"{fg.red}FAIL{fg.rs} - {song_file}")
           else:  
             print(f"{fg.green}GOOD{fg.rs} - {song_file}")
-            if not args.skip_tags:
-              if os.path.exists(song_filename+".opus"):
-                set_metadata( a, t, song_filename+".opus" )
-              if os.path.exists(song_filename+".m4a"):
-                set_metadata( a, t, song_filename+".m4a" )
-            
             c = c + 1
           if errors == 3:
             print ("STOP == too many errors!")
             sys.exit()
-          delay(2)
+            
+        if not args.skip_tags:
+          fn = glob_exists(song_filename)
+          if fn:
+            set_metadata(a, t, fn)
+            
+        if args.delay:
+          delay(40)
       else: #song_id = Null
         c = c + 1
         print(f"{fg.red}NULL{fg.rs} - {song_file}")
 
-ytm = YTMusic("oauth.json")
-c = 0
-ca = 0
+ytm = YTMusic("oauth.json") #===== DEBUG need to except for bad oauth
+c = 0 # track count total
+ca = 0 # album count total
 for artist in artists:
   if artist:
     grab_discography(artist)
         
+# print end stats
 end = time.time()
 elapsed = int(end - start)
 hms = str(datetime.timedelta(seconds=(elapsed)))
