@@ -2,7 +2,7 @@
 #REQUIREMENTS: pip install ytmusicapi yt-dlp sanitize_filename sty music_tag
 #requires apt install ffmpeg
 #run ytmusicapi oauth to get oauth.json
-#version 0.8
+#version 0.9
 
 import json, sys, os, glob, subprocess, time, random, datetime, argparse, re, music_tag
 from sanitize_filename import sanitize
@@ -75,8 +75,10 @@ def prompt_albums(r): # Propmt user which albums should be skipped.
   return out_albums
 
 def set_metadata( album, track, filename ): # runs after file is saved
-  tags = music_tag.load_file(filename)
-  # ~ print("set_metadata",tags["album"])
+  try:
+    tags = music_tag.load_file(filename)
+  except NotImplementedError:
+    return
   if tags["album"]: 
     return #already done
 
@@ -104,7 +106,7 @@ def set_metadata( album, track, filename ): # runs after file is saved
 
   # ~ print("save metadata",tags["album"])
   tags.save()
-  print("   --- got metadata for ", filename.split("/")[-1])
+  print(" -- got metadata", end="")
 
   if errors != 0:
     print("Metadata Incomplete")
@@ -128,16 +130,16 @@ parser.add_argument('-t', '--skip-tags', action='store_true', help=' skip saving
 parser.add_argument('-d', '--delay', action='store_true', help='delay ~40s per album to avoid google ban')
 parser.add_argument('-l', '--live', action='store_true', help='include live albums') #===== DEBUG not implemented
 
-parser.add_argument('--fixall', action='store_true', help='fix misnumbered files, missing metadata') # ===== TEMP
+parser.add_argument('--rescan', action='store_true', help='rescan all artists for missing metadata, newly avail songs')
 
 args = parser.parse_args()
 
 if args.output_dir[-1] == "/":
   args.output_dir = args.output_dir[0:-1]
 
-if args.fixall:                             # ===== TEMP
-  artists = os.listdir(args.output_dir)     #
-else:                                       #
+if args.rescan:
+  artists = os.listdir(args.output_dir)
+else:
   if args.file: # require file or artist(s)
     with open(args.file, "r") as f:
       artists = f.read().split("\n")
@@ -154,9 +156,10 @@ if not os.path.exists("oauth.json"):
 
 
 def grab_discography(search):
-  global c, ca, ytm
+  global c, ca, cur_artist, tot_artist, ytm
   r = ytm.search(search, filter="artists")
   artist = r[0]["artist"]
+  cur_artist = cur_artist + 1
 
   d = similar(search.lower(), artist.lower())
   e = similar(("the "+search).lower(), artist.lower())
@@ -166,8 +169,6 @@ def grab_discography(search):
 
   artist_id = r[0]["browseId"]
   artist_dir = sane_fn(artist)
-  print ("===",artist)
-
   r = ytm.get_artist(artist_id)
   discography_id = r["albums"]["browseId"]
   try:
@@ -191,9 +192,10 @@ def grab_discography(search):
     path = f"{args.output_dir}/{artist_dir}/{album_dir}/"
     os.makedirs(os.path.dirname(path), exist_ok=True)
     b = b + 1
-    print(f"{b}/{num_albums} -- {album_title}")
+    print(f"{cur_artist}/{tot_artist}: {artist} -- {b}/{num_albums}: {album_title}")
    
     s = ytm.get_album(album_id)
+    delay(1)
     # ~ try: # ===== trying to identify live albums
       # ~ print(s["description"])
     # ~ except:
@@ -210,12 +212,12 @@ def grab_discography(search):
       if f_old:                                       #
         ext = f_old.split(".")[-1]                    #
         os.rename(f_old, f"{path}{song_file}.{ext}")  #
-        print(f"RENAMED {path}{song_file}.{ext}")     #
+        out = f"RENAMED {path}{song_file}.{ext}"      #
 
       if song_id:
         song_filename = f"{path}/{song_file}"
         if glob_exists(song_filename):
-          print(f"{fg.li_blue}SKIPPED{fg.rs}")
+          print(f"{fg.li_blue}SKIPPED{fg.rs}", end="")
         else:
           cmd = f'yt-dlp -q -x -P "{path}" -o "{song_file}" -- {song_id} '
           try:
@@ -227,21 +229,22 @@ def grab_discography(search):
 
           if u != 0: #result code
             errors = errors + 1
-            print(f"{fg.red}FAIL{fg.rs} - {song_file}")
+            print(f"{fg.red}FAIL{fg.rs} - {song_file}", end="")
           else:  
-            print(f"{fg.green}GOOD{fg.rs} - {song_file}")
+            print(f"{fg.green}GOOD{fg.rs} - {song_file}", end="")
             c = c + 1
           if errors == 3:
-            print ("STOP == too many errors!")
+            print("STOP == too many errors!")
             sys.exit()
+          if args.delay:
+            delay(40)
             
         if not args.skip_tags:
           fn = glob_exists(song_filename)
           if fn:
             set_metadata(a, t, fn)
-            
-        if args.delay:
-          delay(40)
+        print("") # send newline
+  
       else: #song_id = Null
         c = c + 1
         print(f"{fg.red}NULL{fg.rs} - {song_file}")
@@ -249,6 +252,8 @@ def grab_discography(search):
 ytm = YTMusic("oauth.json") #===== DEBUG need to except for bad oauth
 c = 0 # track count total
 ca = 0 # album count total
+cur_artist = 0
+tot_artist = len(artists)
 for artist in artists:
   if artist:
     grab_discography(artist)
