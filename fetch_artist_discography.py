@@ -2,7 +2,7 @@
 #REQUIREMENTS: pip install ytmusicapi yt-dlp sanitize_filename sty music_tag
 #requires apt install ffmpeg
 #run ytmusicapi oauth to get oauth.json
-#version 0.9
+#version 0.10
 
 import json, sys, os, glob, subprocess, time, random, datetime, argparse, re, music_tag
 from sanitize_filename import sanitize
@@ -74,7 +74,7 @@ def prompt_albums(r): # Propmt user which albums should be skipped.
   # print("New album list: "+ str(out_albums))
   return out_albums
 
-def set_metadata( album, track, filename ): # runs after file is saved
+def set_metadata(album, track, filename): # runs after file is saved
   try:
     tags = music_tag.load_file(filename)
   except NotImplementedError:
@@ -118,6 +118,13 @@ def glob_exists(filename): #detect song with any extension, return filename
   else:
     return False
   
+def is_live_album(album_name):
+  return re.search(r"([\[\(]live[\]\)]|live (at|in|from|-)|^live! | live$| live!)", album_name, re.I)
+
+def write_error(text):
+  with open("error.log", "a") as f:
+    f.write(text+"\n")
+
   
 #=====main()
 start = time.time()
@@ -165,6 +172,7 @@ def grab_discography(search):
   e = similar(("the "+search).lower(), artist.lower())
   if d < 0.9 and e < 0.9: #not a good match ===== DEBUG need to log this!
     print(f'best fit for "{search}" is "{artist}": not good enough to continue')
+    write_error(f'BADARTIST: "{search}" best match is "{artist}"')
     return
 
   artist_id = r[0]["browseId"]
@@ -188,6 +196,9 @@ def grab_discography(search):
     ca = ca + 1
     album_id = a["browseId"]
     album_title = a["title"]
+    if not args.live:
+      if is_live_album(album_title):
+        continue #skip because live album
     album_dir = sane_fn(album_title)
     path = f"{args.output_dir}/{artist_dir}/{album_dir}/"
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -230,6 +241,7 @@ def grab_discography(search):
           if u != 0: #result code
             errors = errors + 1
             print(f"{fg.red}FAIL{fg.rs} - {song_file}", end="")
+            write_error(f'FAIL: "{song_file}" was unable to download')
           else:  
             print(f"{fg.green}GOOD{fg.rs} - {song_file}", end="")
             c = c + 1
@@ -248,6 +260,9 @@ def grab_discography(search):
       else: #song_id = Null
         c = c + 1
         print(f"{fg.red}NULL{fg.rs} - {song_file}")
+        write_error(f'NULL: "{song_file}" had no song_id')
+
+write_error(f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}\n")
 
 ytm = YTMusic("oauth.json") #===== DEBUG need to except for bad oauth
 c = 0 # track count total
