@@ -1,7 +1,7 @@
 # REQUIREMENTS: pip install ytmusicapi yt-dlp sanitize_filename sty music_tag paramiko requests
 # requires apt install ffmpeg
 # run ytmusicapi oauth to get oauth.json
-# version 0.13
+# version 0.14
 
 import json
 import sys
@@ -461,6 +461,105 @@ class DiscographyDownloader:
             self.db.commit()
         return album_status
 
+    def parse_albums(self, artist_info: Dict, artist_match: str, artist_db_id: int) -> List[Dict]:
+        """Parse albums, EPs, singles, and playlist-based albums from artist_info into a unified album list."""
+        albums = []
+        
+        # Handle regular albums
+        try:
+            albums.extend(artist_info.get("albums", {}).get("results", []))
+            discography_id = artist_info["albums"].get("browseId")
+            discography_params = artist_info["albums"].get("params")
+            if discography_params:
+                albums = self.ytm.get_artist_albums(discography_id, discography_params)
+        except KeyError:
+            pass  # No albums, continue to singles/EPs
+
+        # Handle singles and EPs
+        single_tracks = []
+        ep_albums = []
+        try:
+            singles = artist_info.get("singles", {}).get("results", [])
+            songs = artist_info.get("songs", {}).get("results", [])
+            
+            # Separate singles and EPs
+            for single in singles:
+                if single.get("year") == "EP" and single.get("browseId"):
+                    ep_albums.append({
+                        "title": single.get("title", ""),
+                        "browseId": single.get("browseId"),
+                        "year": single.get("year")
+                    })
+                else:
+                    single_tracks.append(single)
+
+            # Add EPs as albums
+            albums.extend(ep_albums)
+
+            # Create virtual "Singles" album
+            if single_tracks:
+                virtual_album = {
+                    "title": "Singles",
+                    "browseId": None,
+                    "year": None,
+                    "tracks": [
+                        {
+                            "title": single.get("title", ""),
+                            "videoId": next((song.get("videoId") for song in songs 
+                                            if song.get("album", {}).get("id") == single.get("browseId")), None),
+                            "trackNumber": None,  # Singles keep None to avoid numbering
+                            "artists": [{"name": artist_match}],
+                            "year": single.get("year")
+                        } for single in single_tracks
+                    ]
+                }
+                albums.append(virtual_album)
+        except KeyError:
+            pass  # No singles/EPs, continue to playlist-based albums
+
+        # Handle playlist-based albums
+        processed_albums = []
+        for album in albums:
+            if album.get("audioPlaylistId"):
+                try:
+                    # Fetch playlist tracks
+                    playlist = self.ytm.get_playlist(album["audioPlaylistId"])
+                    tracks = [
+                        {
+                            "title": track.get("title", ""),
+                            "videoId": track.get("videoId"),
+                            "trackNumber": index + 1,  # Assign sequential track number (1-based)
+                            "artists": track.get("artists", [{"name": artist_match}]),
+                            "year": album.get("type")
+                        } for index, track in enumerate(playlist.get("tracks", []))
+                    ]
+                    # Print yt-dlp commands and metadata for playlist-based albums
+                    album_sane = self._sane_filename(album["title"])
+                    album_path = os.path.join(self.args.output_dir, self._sane_filename(artist_match), album_sane)
+                    ##### ~ print(f"\nProcessing playlist-based album: {album['title']}")
+                    for track in tracks:
+                        song_sane = self._sane_filename(track["title"])
+                        song_file = f"{track['trackNumber']} - {song_sane}" if track["trackNumber"] else song_sane
+                        song_filename = os.path.join(album_path, f"{song_file}.opus")
+                        ##### ~ print(f"Would download with yt-dlp: {track['videoId']} to {song_filename}")
+                        ##### ~ print(f"Metadata: album={album['title']}, artist={track['artists'][0]['name']}, tracktitle={track['title']}, tracknumber={track['trackNumber']}, year={track['year']}")
+                    # Add pseudo-album with tracks for processing
+                    processed_albums.append({
+                        "title": album["title"],
+                        "browseId": album.get("browseId"),
+                        "year": album.get("type"),
+                        "tracks": tracks
+                    })
+                except Exception as e:
+                    print(f"Failed to fetch playlist {album['audioPlaylistId']}: {e}")
+                    self._write_error(f"PLAYLIST FETCH ERROR: {album['title']} - {str(e)}")
+                    continue
+            else:
+                # Regular album (no playlist)
+                processed_albums.append(album)
+
+        return processed_albums
+    
     def grab_discography(self, artist_name: str) -> None:
         """Process an artist's discography."""
         self.current_artist_idx += 1
@@ -525,93 +624,16 @@ class DiscographyDownloader:
             self._write_error(error_msg)
             return
 
-        try:
-            albums = artist_info["albums"]["results"]
-            discography_id = artist_info["albums"]["browseId"]
-            discography_params = artist_info["albums"].get("params")
-            if discography_params:
-                albums = self.ytm.get_artist_albums(discography_id, discography_params)
-        except KeyError:
-            albums = []  # Fallback to empty list if no albums
-
-        # Handle singles and EPs
-        try:
-            singles = artist_info["singles"]["results"]
-            songs = artist_info.get("songs", {}).get("results", [])
-            single_tracks = []
-            ep_albums = []
-            
-            # Separate singles and EPs
-            for single in singles:
-                if single.get("year") == "EP" and single.get("browseId"):
-                    ep_albums.append({
-                        "title": single.get("title", ""),
-                        "browseId": single.get("browseId"),
-                        "year": single.get("year")
-                    })
-                else:
-                    single_tracks.append(single)
-
-            # Process EPs as albums
-            self.current_album_idx = 0
-            self.total_albums = len(albums) + len(ep_albums)
-            artist_status = self.status_codes['FINISHED']
-
-            for ep in ep_albums:
-                album_status = self.grab_album(ep, artist_db_id, self.artist_sane)
-                artist_status = min(artist_status, album_status)
-
-            # Process regular albums
-            for album_data in albums:
-                album_status = self.grab_album(album_data, artist_db_id, self.artist_sane)
-                artist_status = min(artist_status, album_status)
-
-            # Process single tracks in virtual "Singles" album
-            if single_tracks:
-                virtual_album = {
-                    "title": "Singles",
-                    "browseId": None,
-                    "year": None
-                }
-                if self.db:
-                    album_db_id = self._db_check_status("album", "Singles", artist_db_id)
-                    if not album_db_id:
-                        return
-                
-                album_path = os.path.join(self.args.output_dir, self.artist_sane, "Singles")
-                album_status = self.status_codes['FINISHED']
-                
-                for single in single_tracks:
-                    video_id = None
-                    for song in songs:
-                        if song.get("album", {}).get("id") == single.get("browseId"):
-                            video_id = song.get("videoId")
-                            break
-                    track_data = {
-                        "title": single.get("title", ""),
-                        "videoId": video_id,
-                        "trackNumber": None,
-                        "artists": [{"name": artist_match}],
-                        "year": single.get("year")
-                    }
-                    track_status = self.grab_track(virtual_album, track_data, album_path, album_db_id)
-                    album_status = min(album_status, track_status)
-                
-                if self.db:
-                    self.db.execute("UPDATE albums SET status=? WHERE artist_id=? AND id=?", 
-                                    (album_status, artist_db_id, album_db_id))
-                    self.db.commit()
-            
-            if self.db:
-                self.db.execute("UPDATE artists SET status=? WHERE id=?", (artist_status, artist_db_id))
-                self.db.execute("UPDATE queue SET done=1 WHERE artist=?", (artist_name,))
-                self.db.commit()
-            return
-        except KeyError:
+        # Parse albums, EPs, and singles
+        albums = self.parse_albums(artist_info, artist_match, artist_db_id)
+        if not albums:
             error_msg = f"NO ALBUMS ERROR for '{artist_match}'"
             print(f"{fg.red}{error_msg}{fg.rs}")
             self._write_error(f'BAD ALBUM: "{artist_match}" has no albums')
-            self._dump_json(artist_info, self.artist_sane+".json")
+            self._dump_json(artist_info, self.artist_sane + ".json")
+            if self.db:
+                self.db.execute("UPDATE queue SET done=1 WHERE artist=?", (artist_name,))
+                self.db.commit()
             return
 
         if self.args.skip_albums:
@@ -621,8 +643,26 @@ class DiscographyDownloader:
         self.total_albums = len(albums)
         artist_status = self.status_codes['FINISHED']
 
+        # Process albums (regular, EPs, and virtual Singles)
         for album_data in albums:
-            album_status = self.grab_album(album_data, artist_db_id, self.artist_sane)
+            if album_data["title"] == "Singles" and album_data["browseId"] is None:
+                # Handle virtual Singles album separately
+                if self.db:
+                    album_db_id = self._db_check_status("album", "Singles", artist_db_id)
+                    if not album_db_id:
+                        continue
+                album_path = os.path.join(self.args.output_dir, self.artist_sane, "Singles")
+                album_status = self.status_codes['FINISHED']
+                for track_data in album_data.get("tracks", []):
+                    track_status = self.grab_track(album_data, track_data, album_path, album_db_id)
+                    album_status = min(album_status, track_status)
+                if self.db:
+                    self.db.execute("UPDATE albums SET status=? WHERE artist_id=? AND id=?", 
+                                    (album_status, artist_db_id, album_db_id))
+                    self.db.commit()
+            else:
+                # Regular albums and EPs
+                album_status = self.grab_album(album_data, artist_db_id, self.artist_sane)
             artist_status = min(artist_status, album_status)
 
         if self.db:
@@ -703,5 +743,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-# glass animals
