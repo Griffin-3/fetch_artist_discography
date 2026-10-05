@@ -1,7 +1,7 @@
-# REQUIREMENTS: pip install ytmusicapi yt-dlp sanitize_filename sty music_tag paramiko requests
+# REQUIREMENTS: pip install ytmusicapi yt-dlp sanitize_filename sty music_tag paramiko requests dotenv
 # requires apt install ffmpeg
 # run ytmusicapi oauth to get oauth.json
-# version 0.16
+# version 0.17
 
 import json
 import sys
@@ -21,10 +21,10 @@ from ytmusicapi import YTMusic
 from difflib import SequenceMatcher
 from change_fiber_ip import ChangeFiberIP
 
-DAILY_LIMIT = 1600
+DAILY_LIMIT = 2500
 BATCH_LIMIT = 550
-DELAY_SONG = 20
-DELAY_ERROR = 1100
+DELAY_SONG = (90, 120)
+DELAY_ERROR = 1200
 
 class DiscographyDownloader:
     """Manages downloading and organizing music discographies from YouTube Music."""
@@ -34,13 +34,13 @@ class DiscographyDownloader:
         self.args = args
         self.ytm = YTMusic("auth.json")
         self.db = self._open_database() if not args.no_database else None
-        self.count_total = 0
-        self.album_count = 0
-        self.current_artist_idx = 0
-        self.total_artists = 0
-        self.current_album_idx = 0
-        self.total_albums = 0
-        self.artist_sane = ""
+        self.count_total = 0  # Total tracks processed
+        self.album_count = 0  # Total albums processed
+        self.current_artist_idx = 0  # Current artist index
+        self.total_artists = 0  # Total artists
+        self.current_album_idx = 0  # Current album index
+        self.total_albums = 0  # Total albums per artist
+        self.artist_sane = ""  # Sanitized artist name
         self.status_codes = {
             'PRELOAD': 1, 'NULL': 2, 'IGNORED': 3, 'LIVE': 4,
             'NOMETADATA': 5, 'INCOMPLETE': 6, 'ADULT': 7, 'FINISHED': 9
@@ -48,25 +48,25 @@ class DiscographyDownloader:
         self.status_names = {v: k for k, v in self.status_codes.items()}
 
     def _open_database(self) -> sqlite3.Connection:
-        """Create or open SQLite database and initialize tables using a context manager."""
+        """Create or open SQLite database and initialize tables."""
         try:
             db = sqlite3.connect("discography.sq3")
-            with db:
-                db.execute("PRAGMA journal_mode=MEMORY")
-                if not db.execute("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='artists')").fetchone()[0]:
-                    db.execute("CREATE TABLE artists (id INTEGER PRIMARY KEY, artist TEXT, status INTEGER)")
-                    db.execute("CREATE TABLE albums (id INTEGER PRIMARY KEY, artist_id INTEGER, album TEXT, status INTEGER)")
-                    db.execute("CREATE TABLE tracks (id INTEGER PRIMARY KEY, album_id INTEGER, track TEXT, status INTEGER)")
-                    db.execute("CREATE TABLE errors (code TEXT, message TEXT)")
-                    db.execute("CREATE TABLE queue (artist TEXT, done INTEGER DEFAULT 0, suggest TEXT)")
-                    db.execute("CREATE TABLE count (date INTEGER PRIMARY KEY, songs INTEGER)")
-                    db.commit()
-                    self.args.rescan = True
-                return db
+            db.execute("PRAGMA journal_mode=MEMORY")
+            if not db.execute(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='artists')"
+            ).fetchone()[0]:
+                db.execute("CREATE TABLE artists (id INTEGER PRIMARY KEY, artist TEXT, status INTEGER)")
+                db.execute("CREATE TABLE albums (id INTEGER PRIMARY KEY, artist_id INTEGER, album TEXT, status INTEGER)")
+                db.execute("CREATE TABLE tracks (id INTEGER PRIMARY KEY, album_id INTEGER, track TEXT, status INTEGER)")
+                db.execute("CREATE TABLE errors (code TEXT, message TEXT)")
+                db.execute("CREATE TABLE queue (artist TEXT, done INTEGER DEFAULT 0, suggest TEXT)")
+                db.execute("CREATE TABLE count (date INTEGER PRIMARY KEY, songs INTEGER)")
+                db.commit()
+                self.args.rescan = True
+            return db
         except sqlite3.Error as e:
-            error_msg = f"Database error: {e}"
-            self._send_telegram_alert(error_msg)
-            sys.exit(error_msg)
+            self._send_telegram_alert(f"Database error: {e}")
+            sys.exit(f"Database error: {e}")
 
     def _count_file(self, check_only: bool = False) -> int:
         """Update daily song count in a file."""
@@ -126,12 +126,17 @@ class DiscographyDownloader:
         """Calculate similarity between two strings."""
         return SequenceMatcher(None, a, b).ratio()
 
-    def _delay(self, seconds: int = 10) -> None:
-        """Delay execution with random variation (±50%)."""
-        time.sleep(random.randint(int(seconds / 2), int(seconds * 1.5)))
+    def _delay(self, seconds: int | tuple = 10) -> None:
+        """Sleep for a random interval. A tuple is an inclusive range. A single value varies by ±50%."""
+        if isinstance(seconds, tuple):
+            low, high = seconds
+        else:
+            low, high = int(seconds / 2), int(seconds * 1.5)
+        time.sleep(random.randint(low, high))
 
     def _send_telegram_alert(self, message: str) -> None:
         """Stub method to send a Telegram notification for unhandled errors."""
+        # TODO: Implement Telegram notification using a library like python-telegram-bot
         print(f"TELEGRAM ALERT: {message} (Implement Telegram bot to send to user)")
 
     def _prompt_albums(self, albums: List[Dict]) -> List[Dict]:
@@ -167,11 +172,12 @@ class DiscographyDownloader:
         except NotImplementedError:
             return False
         if tags["album"]:
-            return True
+            return True  # Already tagged
 
         success = True
         incomplete_fields = []
 
+        # Critical fields: album and artist
         try:
             tags["album"] = album["title"]
         except Exception as e:
@@ -184,6 +190,7 @@ class DiscographyDownloader:
             incomplete_fields.append(f"artist: {e}")
             success = False
 
+        # Non-critical fields
         try:
             track_year = track.get("year", album.get("year", ""))
             tags["year"] = "" if track_year in ["Single", "EP"] else track_year
@@ -245,7 +252,7 @@ class DiscographyDownloader:
             sql = f"SELECT status, id FROM albums WHERE {parent_field}=? AND {field}=?"
             insert_sql = f"INSERT INTO albums VALUES(NULL, ?, ?, 1)"
             display = f"  {self.current_artist_idx}/{self.total_artists}: {self.artist_sane} -- {self.current_album_idx}/{self.total_albums}: {name} {fg.li_blue}"
-        else:
+        else:  # track
             table, field, parent_field = "tracks", "track", "album_id"
             values = (parent_id, name)
             sql = f"SELECT status, id FROM tracks WHERE {parent_field}=? AND {field}=?"
@@ -257,12 +264,8 @@ class DiscographyDownloader:
             status, entity_id = result
             status_name = self.status_names.get(status, "OTHER")
             if entity_type == "track" and status == self.status_codes['ADULT']:
-                if self.args.use_profile:
-                    print(f"    {fg.li_blue}RETRYING ADULT{fg.rs} - {name} with browser profile")
-                    return entity_id
-                else:
-                    print(f"    {fg.red}ADULT{fg.rs} - {name}")
-                    return 0
+                print(f"    {fg.red}ADULT{fg.rs} - {name}")
+                return 0
             if status in (
                 self.status_codes['FINISHED'],
                 self.status_codes['NOMETADATA'] if self.args.skip_tags else -1,
@@ -297,11 +300,18 @@ class DiscographyDownloader:
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'opus',
-                'preferredquality': '0',
+                'preferredquality': '0',  # 0 ensures the best quality for opus
             }],
+            'extractor_args': {
+				'youtube': [
+					'player_client=tv,android,mweb',
+				]
+			},
+			'remote_components': ['ejs:github'],
+			# Optional helpers (uncomment if needed):
+			# 'cookiesfrombrowser': ('firefox',), # If you need logged-in access (age-restricted, etc.)
+			# 'verbose': True,			
         }
-        if self.args.use_profile:
-            ydl_opts['cookiesfrombrowser'] = (self.args.use_profile,)
 
         self.count_total += 1
         try:
@@ -316,14 +326,14 @@ class DiscographyDownloader:
         except Exception as e:
             error_msg = f"UNCAUGHT ERROR: {song_id}\n{e}"
             self._send_telegram_alert(error_msg)
-            self._write_error(error_msg)
-            return 1, error_msg
+            sys.exit(error_msg)
 
     def grab_track(self, album_data: Dict, track_data: Dict, album_path: str, album_db_id: int) -> int:
         """Process a single track."""
         song_title = track_data["title"]
         song_id = track_data.get("videoId")
         song_sane = self._sane_filename(song_title)
+        # Use trackNumber if not None; otherwise, omit prefix
         track_number = track_data.get("trackNumber")
         song_file = f"{track_number} - {song_sane}" if track_number is not None else song_sane
         track_status = self.status_codes['INCOMPLETE']
@@ -341,14 +351,14 @@ class DiscographyDownloader:
 
         elif song_id:
             return_code, stderr = self._download_track(album_path, song_file, song_id)
-            error_text = ""
             skip_error = False
+            error_text = ""
+            errors = 0  # Track download errors for this track
 
             if return_code == 1:
                 error_patterns = {
                     "Sign in to confirm your age": "AGE ERROR",
                     "Signature extraction failed|msig extraction failed": "SIG EXTRACTION ERROR",
-                    "audio conversion failed": "CODEC ERROR",
                     "File name too long": "FILENAME TOO LONG ERROR",
                     "The downloaded file is empty": "DOWNLOADED FILE EMPTY",
                     "Join this channel to get access": "SPECIAL CHANNEL ACCESS",
@@ -359,48 +369,45 @@ class DiscographyDownloader:
                 for pattern, message in error_patterns.items():
                     if re.search(pattern, stderr, re.I):
                         error_text = message
-                        if message == "FORBIDDEN ERROR":
-                            print(f"{fg.red}{error_text}{fg.rs} -- waiting {DELAY_ERROR}s to retry")
-                            self._write_error(f"FORBIDDEN ERROR: {self.artist_sane} - {song_sane}")
-                            self._delay(DELAY_ERROR)
-                            return_code, stderr = self._download_track(album_path, song_file, song_id)
-                            if return_code == 1 and re.search("Error 403: Forbidden", stderr, re.I):
-                                error_msg = f"Persistent 403 Forbidden error after retry: {song_file}"
-                                print(f"{fg.red}FAIL{fg.rs} - {song_file} - {fg.red}{error_msg}{fg.rs}")
-                                self._write_error(error_msg)
-                                sys.exit(error_msg)
-                            break
-                        elif message == "AGE ERROR" and self.db:
+                        if message == "AGE ERROR":
                             track_status = self.status_codes['ADULT']
                             skip_error = True
                             self._write_error(f"ADULT: {self.artist_sane} - {song_sane}\n")
-                            break
-                        elif message in [
-                            "SIG EXTRACTION ERROR", "FILENAME TOO LONG ERROR", "DOWNLOADED FILE EMPTY",
-                            "SPECIAL CHANNEL ACCESS", "NAME RESOLUTION ERROR", "CODEC ERROR"
-                        ]:
-                            skip_error = True
-                            break
+                        else:
+                            skip_error = message in [
+                                "SIG EXTRACTION ERROR", "FILENAME TOO LONG ERROR",
+                                "DOWNLOADED FILE EMPTY", "SPECIAL CHANNEL ACCESS"
+                            ]
+                        break
                 else:
                     error_text = f"OTHER ERROR\n{stderr}"
                     self._send_telegram_alert(f"Unhandled yt-dlp error for {song_file}: {error_text}")
-                    self._write_error(error_text)
 
-                if not skip_error and error_text and error_text != "FORBIDDEN ERROR":
-                    print(f"{fg.red}{error_text}{fg.rs} -- waiting {DELAY_ERROR}s to retry")
-                    self._write_error(f"RETRY: {error_text} - {self.artist_sane} - {song_sane}")
-                    self._delay(DELAY_ERROR)
+                # --one-song is a single probe: do not wait and hit YouTube again.
+                if not skip_error and not self.args.one_song:
+                    print(f"{fg.red}{error_text}{fg.rs} -- wait {DELAY_ERROR}s and try again")
+                    self._write_error(error_text)
+                    time.sleep(DELAY_ERROR)
                     return_code, stderr = self._download_track(album_path, song_file, song_id)
                     if return_code == 1:
-                        print(f"{fg.red}FAIL{fg.rs} - {song_file} - {fg.red}{error_text}{fg.rs}", end="")
-                        self._write_error(f"FAIL: {song_file} - {error_text}")
-                        track_status = self.status_codes['INCOMPLETE']
+                        print(f"{fg.red}{error_text}{fg.rs} FAIL !!!")
+                        errors += 1
+                        self._send_telegram_alert(f"Persistent yt-dlp error for {song_file}: {error_text}")
+                        sys.exit()
+
+                if errors >= 3:
+                    error_msg = "STOP == too many errors!"
+                    self._send_telegram_alert(error_msg)
+                    print(error_msg)
+                    sys.exit()
+
             if return_code != 0:
-                if error_text != "FORBIDDEN ERROR":  # FORBIDDEN ERROR already handled
-                    print(f"    {fg.red}FAIL{fg.rs} - {song_file} - {fg.red}{error_text}{fg.rs}", end="")
-                    self._write_error(f"FAIL: {song_file} - {error_text}")
+                print(f"    {fg.red}FAIL{fg.rs} - {song_file} - {fg.red}{error_text}{fg.rs}", end="")
+                self._write_error(f"FAIL: {song_file} - {error_text}")
+                if track_status != self.status_codes['ADULT']:
                     track_status = self.status_codes['INCOMPLETE']
             else:
+                # Adjust output to omit track number if None
                 display_file = song_sane if track_number is None else f"{track_number} - {song_sane}"
                 print(f"    {fg.green}GOOD{fg.rs} - {display_file}", end="")
                 track_status = self.status_codes['NOMETADATA']
@@ -410,21 +417,27 @@ class DiscographyDownloader:
                 if self._set_metadata(album_data, track_data, existing_file):
                     track_status = self.status_codes['FINISHED']
         else:
+            # Adjust output for NULL case
             display_file = song_sane if track_number is None else f"{track_number} - {song_sane}"
             print(f"    {fg.red}NULL{fg.rs} - {display_file}", end="")
             track_status = self.status_codes['NULL']
-            skip_delay = True
 
-        print("")
+        print("")  # Newline after track processing
         if self.db:
             self.db.execute("UPDATE tracks SET status=? WHERE album_id=? AND id=?", 
                            (track_status, album_db_id, track_db_id))
             self.db.commit()
+        if self.args.one_song and song_id and not skip_delay:
+            print(f"{fg.li_blue}STOP{fg.rs} --one-song")
+            if self.db:
+                self.db.close()
+            sys.exit(0)
         if not skip_delay:
             self._delay(DELAY_SONG)         
         return track_status
 
     def grab_album(self, album_data: Dict, artist_db_id: int, artist_name_sane: str) -> int:
+        """Process a single album."""
         self.current_album_idx += 1
         self.album_count += 1
         album_id = album_data["browseId"]
@@ -477,7 +490,10 @@ class DiscographyDownloader:
         return album_status
 
     def parse_albums(self, artist_info: Dict, artist_match: str, artist_db_id: int) -> List[Dict]:
+        """Parse albums, EPs, singles, and playlist-based albums from artist_info into a unified album list."""
         albums = []
+        
+        # Handle regular albums
         try:
             albums.extend(artist_info.get("albums", {}).get("results", []))
             discography_id = artist_info["albums"].get("browseId")
@@ -485,13 +501,16 @@ class DiscographyDownloader:
             if discography_params:
                 albums = self.ytm.get_artist_albums(discography_id, discography_params)
         except KeyError:
-            pass
+            pass  # No albums, continue to singles/EPs
 
+        # Handle singles and EPs
         single_tracks = []
         ep_albums = []
         try:
             singles = artist_info.get("singles", {}).get("results", [])
             songs = artist_info.get("songs", {}).get("results", [])
+            
+            # Separate singles and EPs
             for single in singles:
                 if single.get("year") == "EP" and single.get("browseId"):
                     ep_albums.append({
@@ -502,7 +521,10 @@ class DiscographyDownloader:
                 else:
                     single_tracks.append(single)
 
+            # Add EPs as albums
             albums.extend(ep_albums)
+
+            # Create virtual "Singles" album
             if single_tracks:
                 virtual_album = {
                     "title": "Singles",
@@ -512,8 +534,8 @@ class DiscographyDownloader:
                         {
                             "title": single.get("title", ""),
                             "videoId": next((song.get("videoId") for song in songs 
-                                            if song.get("album", {}) and song.get("album", {}).get("id") == single.get("browseId")), None),
-                            "trackNumber": None,
+                                            if song.get("album", {}).get("id") == single.get("browseId")), None),
+                            "trackNumber": None,  # Singles keep None to avoid numbering
                             "artists": [{"name": artist_match}],
                             "year": single.get("year")
                         } for single in single_tracks
@@ -521,28 +543,35 @@ class DiscographyDownloader:
                 }
                 albums.append(virtual_album)
         except KeyError:
-            pass
+            pass  # No singles/EPs, continue to playlist-based albums
 
+        # Handle playlist-based albums
         processed_albums = []
         for album in albums:
             if album.get("audioPlaylistId"):
                 try:
+                    # Fetch playlist tracks
                     playlist = self.ytm.get_playlist(album["audioPlaylistId"])
                     tracks = [
                         {
                             "title": track.get("title", ""),
                             "videoId": track.get("videoId"),
-                            "trackNumber": index + 1,
+                            "trackNumber": index + 1,  # Assign sequential track number (1-based)
                             "artists": track.get("artists", [{"name": artist_match}]),
                             "year": album.get("type")
                         } for index, track in enumerate(playlist.get("tracks", []))
                     ]
+                    # Print yt-dlp commands and metadata for playlist-based albums
                     album_sane = self._sane_filename(album["title"])
                     album_path = os.path.join(self.args.output_dir, self._sane_filename(artist_match), album_sane)
+                    ##### ~ print(f"\nProcessing playlist-based album: {album['title']}")
                     for track in tracks:
                         song_sane = self._sane_filename(track["title"])
                         song_file = f"{track['trackNumber']} - {song_sane}" if track["trackNumber"] else song_sane
                         song_filename = os.path.join(album_path, f"{song_file}.opus")
+                        ##### ~ print(f"Would download with yt-dlp: {track['videoId']} to {song_filename}")
+                        ##### ~ print(f"Metadata: album={album['title']}, artist={track['artists'][0]['name']}, tracktitle={track['title']}, tracknumber={track['trackNumber']}, year={track['year']}")
+                    # Add pseudo-album with tracks for processing
                     processed_albums.append({
                         "title": album["title"],
                         "browseId": album.get("browseId"),
@@ -554,11 +583,13 @@ class DiscographyDownloader:
                     self._write_error(f"PLAYLIST FETCH ERROR: {album['title']} - {str(e)}")
                     continue
             else:
+                # Regular album (no playlist)
                 processed_albums.append(album)
 
         return processed_albums
     
     def grab_discography(self, artist_name: str) -> None:
+        """Process an artist's discography."""
         self.current_artist_idx += 1
         self.artist_sane = self._sane_filename(artist_name)
 
@@ -621,6 +652,7 @@ class DiscographyDownloader:
             self._write_error(error_msg)
             return
 
+        # Parse albums, EPs, and singles
         albums = self.parse_albums(artist_info, artist_match, artist_db_id)
         if not albums:
             error_msg = f"NO ALBUMS ERROR for '{artist_match}'"
@@ -639,8 +671,10 @@ class DiscographyDownloader:
         self.total_albums = len(albums)
         artist_status = self.status_codes['FINISHED']
 
+        # Process albums (regular, EPs, and virtual Singles)
         for album_data in albums:
             if album_data["title"] == "Singles" and album_data["browseId"] is None:
+                # Handle virtual Singles album separately
                 if self.db:
                     album_db_id = self._db_check_status("album", "Singles", artist_db_id)
                     if not album_db_id:
@@ -655,6 +689,7 @@ class DiscographyDownloader:
                                     (album_status, artist_db_id, album_db_id))
                     self.db.commit()
             else:
+                # Regular albums and EPs
                 album_status = self.grab_album(album_data, artist_db_id, self.artist_sane)
             artist_status = min(artist_status, album_status)
 
@@ -663,44 +698,14 @@ class DiscographyDownloader:
             self.db.execute("UPDATE queue SET done=1 WHERE artist=?", (artist_name,))
             self.db.commit()
 
-    def rescan_directories(self) -> None:
-        if self.db is None:
-            print("ERROR: --rescan requires the database (do not use --no-database).")
-            sys.exit(1)
-
-        artist_dirs = sorted([d for d in os.listdir(self.args.output_dir) 
-                              if os.path.isdir(os.path.join(self.args.output_dir, d))], key=str.lower)
-        
-        processed_count = 0
-        for artist in artist_dirs:
-            result = self._db_fetch("SELECT id FROM artists WHERE artist = ?", (artist,))
-            if result:
-                artist_id = result
-                self.db.execute("UPDATE artists SET status = ? WHERE id = ?", 
-                                (self.status_codes['INCOMPLETE'], artist_id))
-            else:
-                cursor = self.db.cursor()
-                cursor.execute("INSERT INTO artists (artist, status) VALUES (?, ?)", 
-                               (artist, self.status_codes['PRELOAD']))
-            result = self._db_fetch("SELECT done FROM queue WHERE artist = ?", (artist,))
-            if result is not None:
-                self.db.execute("UPDATE queue SET done = 0, suggest = NULL WHERE artist = ?", (artist,))
-            else:
-                self.db.execute("INSERT INTO queue (artist, done, suggest) VALUES (?, 0, NULL)", (artist,))
-            processed_count += 1
-
-        self.db.commit()
-        print(f"Rescanned {processed_count} artists from directories and added/updated in queue with done=0.")
-
     def run(self, artists: List[str]) -> None:
         """Run the discography downloader for a list of artists."""
         start = time.time()
         self.total_artists = len(artists)
 
-        if self.args.force_ip_change or len(artists) > 5:
+        if len(artists) > 5 and not self.args.one_song:
             fiber = ChangeFiberIP("discography.sq3", "addresses")
-            if self.args.force_ip_change or fiber.get_current_ip_age() > 1:
-                print("Forcing IP change before processing artists...")
+            if fiber.get_current_ip_age() > 2:
                 fiber.change_ip()
 
         self._write_error(f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())} =====")
@@ -731,10 +736,17 @@ def main():
     parser.add_argument('--preload', action='store_true', help='preload artists for daemon')
     parser.add_argument('--status', action='store_true', help='show daemon status')
     parser.add_argument('--daemon', action='store_true', help='run as daemon, implies --delay')
-    parser.add_argument('--use_profile', metavar='BROWSER', type=str, default="", help='steal cookies from "firefox" or "chrome"')
     parser.add_argument('--batch_limit', metavar='LIMIT', type=int, default=0, help='limit per batch')
-    parser.add_argument('--force_ip_change', action='store_true', help='force IP change before processing artists')
+    # Internal only. Hidden from --help.
+    # --one-song: download a single track, then exit. No error retry.
+    # --change-ip: rotate the WAN address, then exit. No YouTube requests.
+    parser.add_argument('--one-song', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('--change-ip', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
+
+    if args.change_ip:
+        fiber = ChangeFiberIP("discography.sq3", "addresses")
+        sys.exit(0 if fiber.change_ip() else 1)
 
     if args.output_dir.endswith("/"):
         args.output_dir = args.output_dir[:-1]
@@ -743,37 +755,23 @@ def main():
 
     artists = []
     if args.rescan:
-        artists = sorted(os.listdir(args.output_dir), key=str.lower)
+        artists = os.listdir(args.output_dir)
     if args.file:
         with open(args.file, "r") as f:
             artists.extend(line.strip() for line in f if line.strip())
     artists.extend(args.artists)
-    
-    downloader = DiscographyDownloader(args)
-    
-    if args.rescan:
-        downloader.rescan_directories()
-    
     if args.daemon and not args.no_database:
         db = sqlite3.connect("discography.sq3")
-        artists = db.execute("SELECT GROUP_CONCAT(artist,'|') FROM queue WHERE done=0").fetchone()[0]
-        if artists:
-            artists = artists.split("|")
-        else:
-            exit("DONE!")
+        artists = db.execute("SELECT GROUP_CONCAT(artist,'|') FROM queue WHERE done=0").fetchone()[0].split("|")
         db.close()
     if args.batch_limit:
         global BATCH_LIMIT
         BATCH_LIMIT = args.batch_limit
-    if args.use_profile:
-        print(f"Using browser profile: {args.use_profile}")
-        DAILY_LIMIT = 200
-        BATCH_LIMIT = 50
-        DELAY_SONG = 300
     if not artists:
         print("ERROR: At least one artist or a --file artist list is required, none left in queue.")
         sys.exit()
 
+    downloader = DiscographyDownloader(args)
     if not args.no_database:
         downloader._count_db(check_only=True)
     else:

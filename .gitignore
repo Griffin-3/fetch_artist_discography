@@ -1,1 +1,5 @@
-.env
+*
+!.gitignore
+!README.md
+!change_fiber_ip.py
+!fetch_artist_discography.py

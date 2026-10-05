@@ -1,8 +1,10 @@
+import os
 import paramiko
 import time
 import sys
 import requests
 import sqlite3
+from dotenv import load_dotenv
 from datetime import datetime, timedelta
 
 class ChangeFiberIP:
@@ -14,6 +16,7 @@ class ChangeFiberIP:
         self.days = days
 
         # Router configuration
+        load_dotenv()
         self.router_ip = os.getenv("router_ip")
         self.username = os.getenv("router_username")
         self.password = os.getenv("router_password")
@@ -48,14 +51,17 @@ class ChangeFiberIP:
             sys.exit(1)
 
     def _check_ip_in_db(self, ip):
-        """Check if the IP exists in the database and return its status and date."""
         try:
             conn = sqlite3.connect(self.sqlite3_file)
             cursor = conn.cursor()
             cursor.execute(f"SELECT date, status FROM {self.table} WHERE ip = ?", (ip,))
             result = cursor.fetchone()
             conn.close()
-            return result  # Returns (date, status) or None if not found
+            if result is None:
+                self._insert_new_ip(ip)
+                today_date = int(datetime.now().strftime("%Y%m%d"))
+                return (today_date, 0)  # Consistent with (date, status)
+            return result
         except sqlite3.Error as e:
             print(f"Failed to check IP in database: {e}")
             return None
@@ -72,8 +78,9 @@ class ChangeFiberIP:
         except sqlite3.Error as e:
             print(f"Failed to update IP date: {e}")
 
-    def _insert_new_ip(self, ip, today_date):
+    def _insert_new_ip(self, ip):
         """Insert a new IP into the database with today's date and status = 0."""
+        today_date = int(datetime.now().strftime("%Y%m%d"))
         try:
             conn = sqlite3.connect(self.sqlite3_file)
             cursor = conn.cursor()
@@ -85,19 +92,19 @@ class ChangeFiberIP:
             print(f"Failed to insert new IP: {e}")
 
     def _is_ip_invalid(self, ip_info, today_date):
-        """Check if the IP is banned (status = 1) or too recent (less than self.days old)."""
         if not ip_info:
-            return False  # IP not in database, not invalid
+            return False
         ip_date, status = ip_info
         if status == 1:
             print(f"IP is banned (status = 1)")
             return True
-        thirty_days_ago = int((datetime.strptime(str(today_date), "%Y%m%d") - timedelta(days=self.days)).strftime("%Y%m%d"))
-        if ip_date > thirty_days_ago:
-            print(f"IP is too recent (date {ip_date}, less than {self.days} days ago)")
+        today = datetime.strptime(str(today_date), "%Y%m%d")
+        thirty_days_ago = today - timedelta(days=self.days)
+        if ip_date > int(thirty_days_ago.strftime("%Y%m%d")):
+            print(f"IP is too recent (date {ip_date}, less than {self.days} days old)")
             return True
         return False
-
+    
     def _get_public_ip(self):
         """Fetch the current public IP address from the specified URL."""
         try:
@@ -170,20 +177,17 @@ class ChangeFiberIP:
             return False
 
     def get_current_ip_age(self):
-        """Return the age (in days) of the current public IP, or None if not found."""
         try:
             current_ip = self._get_public_ip()
             if not current_ip:
                 print("Could not retrieve current public IP.")
                 return None
-
             ip_info = self._check_ip_in_db(current_ip)
             if not ip_info:
                 print(f"IP {current_ip} not found in database.")
                 return None
-
             ip_date, _ = ip_info
-            today = datetime.strptime(datetime.now().strftime("%Y%m%d"), "%Y%m%d")
+            today = datetime.now()
             ip_date_dt = datetime.strptime(str(ip_date), "%Y%m%d")
             age_days = (today - ip_date_dt).days
             print(f"IP {current_ip} is {age_days} days old.")
@@ -250,7 +254,7 @@ class ChangeFiberIP:
                             continue
                     else:
                         # New IP, insert into database
-                        self._insert_new_ip(new_ip, today_date)
+                        self._insert_new_ip(new_ip)
 
                     # Valid IP found, return success
                     print(f"Valid IP {new_ip} obtained.")
