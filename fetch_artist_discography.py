@@ -1,7 +1,7 @@
 # REQUIREMENTS: pip install ytmusicapi yt-dlp sanitize_filename sty music_tag paramiko requests
 # requires apt install ffmpeg
 # run ytmusicapi oauth to get oauth.json
-# version 0.14
+# version 0.15
 
 import json
 import sys
@@ -43,30 +43,31 @@ class DiscographyDownloader:
         self.artist_sane = ""  # Sanitized artist name
         self.status_codes = {
             'PRELOAD': 1, 'NULL': 2, 'IGNORED': 3, 'LIVE': 4,
-            'NOMETADATA': 5, 'INCOMPLETE': 6, 'FINISHED': 9
+            'NOMETADATA': 5, 'INCOMPLETE': 6, 'ADULT': 7, 'FINISHED': 9
         }
         self.status_names = {v: k for k, v in self.status_codes.items()}
 
     def _open_database(self) -> sqlite3.Connection:
-        """Create or open SQLite database and initialize tables."""
+        """Create or open SQLite database and initialize tables using a context manager."""
         try:
             db = sqlite3.connect("discography.sq3")
-            db.execute("PRAGMA journal_mode=MEMORY")
-            if not db.execute(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='artists')"
-            ).fetchone()[0]:
-                db.execute("CREATE TABLE artists (id INTEGER PRIMARY KEY, artist TEXT, status INTEGER)")
-                db.execute("CREATE TABLE albums (id INTEGER PRIMARY KEY, artist_id INTEGER, album TEXT, status INTEGER)")
-                db.execute("CREATE TABLE tracks (id INTEGER PRIMARY KEY, album_id INTEGER, track TEXT, status INTEGER)")
-                db.execute("CREATE TABLE errors (code TEXT, message TEXT)")
-                db.execute("CREATE TABLE queue (artist TEXT, done INTEGER DEFAULT 0, suggest TEXT)")
-                db.execute("CREATE TABLE count (date INTEGER PRIMARY KEY, songs INTEGER)")
-                db.commit()
-                self.args.rescan = True
-            return db
+            with db:
+                db.execute("PRAGMA journal_mode=MEMORY")
+                if not db.execute( # Table exists
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='artists')").fetchone()[0]:
+                    db.execute("CREATE TABLE artists (id INTEGER PRIMARY KEY, artist TEXT, status INTEGER)")
+                    db.execute("CREATE TABLE albums (id INTEGER PRIMARY KEY, artist_id INTEGER, album TEXT, status INTEGER)")
+                    db.execute("CREATE TABLE tracks (id INTEGER PRIMARY KEY, album_id INTEGER, track TEXT, status INTEGER)")
+                    db.execute("CREATE TABLE errors (code TEXT, message TEXT)")
+                    db.execute("CREATE TABLE queue (artist TEXT, done INTEGER DEFAULT 0, suggest TEXT)")
+                    db.execute("CREATE TABLE count (date INTEGER PRIMARY KEY, songs INTEGER)")
+                    db.commit()
+                    self.args.rescan = True
+                return db
         except sqlite3.Error as e:
-            self._send_telegram_alert(f"Database error: {e}")
-            sys.exit(f"Database error: {e}")
+            error_msg = f"Database error: {e}"
+            self._send_telegram_alert(error_msg)
+            sys.exit(error_msg)
 
     def _count_file(self, check_only: bool = False) -> int:
         """Update daily song count in a file."""
@@ -259,6 +260,13 @@ class DiscographyDownloader:
         if result:
             status, entity_id = result
             status_name = self.status_names.get(status, "OTHER")
+            if entity_type == "track" and status == self.status_codes['ADULT']:
+                if self.args.use_profile:
+                    print(f"    {fg.li_blue}RETRYING ADULT{fg.rs} - {name} with browser profile")
+                    return entity_id
+                else:
+                    print(f"    {fg.red}ADULT{fg.rs} - {name}")
+                    return 0
             if status in (
                 self.status_codes['FINISHED'],
                 self.status_codes['NOMETADATA'] if self.args.skip_tags else -1,
@@ -296,6 +304,8 @@ class DiscographyDownloader:
                 'preferredquality': '0',  # 0 ensures the best quality for opus
             }],
         }
+        if self.args.use_profile:
+            ydl_opts['cookiesfrombrowser'] = (self.args.use_profile,)        
 
         self.count_total += 1
         try:
@@ -357,12 +367,16 @@ class DiscographyDownloader:
                             "DOWNLOADED FILE EMPTY", "SPECIAL CHANNEL ACCESS"
                         ]
                         error_text = message
-                        break
-                else:
-                    error_text = f"OTHER ERROR\n{stderr}"
-                    self._send_telegram_alert(f"Unhandled yt-dlp error for {song_file}: {error_text}")
+                        if message == "AGE ERROR" and self.db:
+                            track_status = self.status_codes['ADULT']
+                            skip_error = True
+                            self._write_error(f"ADULT: {self.artist_sane} - {song_sane}\n")
+                            break
+                    else:
+                        error_text = f"OTHER ERROR\n{stderr}"
+                        self._send_telegram_alert(f"Unhandled yt-dlp error for {song_file}: {error_text}")
 
-                if not skip_error:
+                if not skip_error and error_text:
                     print(f"{fg.red}{error_text}{fg.rs} -- wait {DELAY_ERROR}s and try again")
                     self._write_error(error_text)
                     self._delay(DELAY_ERROR)
@@ -372,6 +386,9 @@ class DiscographyDownloader:
                         errors += 1
                         self._send_telegram_alert(f"Persistent yt-dlp error for {song_file}: {error_text}")
                         sys.exit()
+                else:
+                    self._write_error(f"{error_text} - {self.artist_sane} - {song_sane}")
+
 
                 if errors >= 3:
                     error_msg = "STOP == too many errors!"
@@ -382,7 +399,6 @@ class DiscographyDownloader:
             if return_code != 0:
                 print(f"    {fg.red}FAIL{fg.rs} - {song_file} - {fg.red}{error_text}{fg.rs}", end="")
                 self._write_error(f'FAIL: "{song_file}" was unable to download')
-                track_status = self.status_codes['INCOMPLETE']
             else:
                 # Adjust output to omit track number if None
                 display_file = song_sane if track_number is None else f"{track_number} - {song_sane}"
@@ -398,6 +414,7 @@ class DiscographyDownloader:
             display_file = song_sane if track_number is None else f"{track_number} - {song_sane}"
             print(f"    {fg.red}NULL{fg.rs} - {display_file}", end="")
             track_status = self.status_codes['NULL']
+            skip_delay = True
 
         print("")  # Newline after track processing
         if self.db:
@@ -536,13 +553,10 @@ class DiscographyDownloader:
                     # Print yt-dlp commands and metadata for playlist-based albums
                     album_sane = self._sane_filename(album["title"])
                     album_path = os.path.join(self.args.output_dir, self._sane_filename(artist_match), album_sane)
-                    ##### ~ print(f"\nProcessing playlist-based album: {album['title']}")
                     for track in tracks:
                         song_sane = self._sane_filename(track["title"])
                         song_file = f"{track['trackNumber']} - {song_sane}" if track["trackNumber"] else song_sane
                         song_filename = os.path.join(album_path, f"{song_file}.opus")
-                        ##### ~ print(f"Would download with yt-dlp: {track['videoId']} to {song_filename}")
-                        ##### ~ print(f"Metadata: album={album['title']}, artist={track['artists'][0]['name']}, tracktitle={track['title']}, tracknumber={track['trackNumber']}, year={track['year']}")
                     # Add pseudo-album with tracks for processing
                     processed_albums.append({
                         "title": album["title"],
@@ -708,6 +722,7 @@ def main():
     parser.add_argument('--preload', action='store_true', help='preload artists for daemon')
     parser.add_argument('--status', action='store_true', help='show daemon status')
     parser.add_argument('--daemon', action='store_true', help='run as daemon, implies --delay')
+    parser.add_argument('--use_profile', metavar='BROWSER', type=str, default="", help='steal cookies from "firefox" or "chrome"')
     parser.add_argument('--batch_limit', metavar='LIMIT', type=int, default=0, help='limit per batch')
     args = parser.parse_args()
 
@@ -718,7 +733,7 @@ def main():
 
     artists = []
     if args.rescan:
-        artists = os.listdir(args.output_dir)
+        artists = sorted(os.listdir(args.output_dir), key=str.lower)
     if args.file:
         with open(args.file, "r") as f:
             artists.extend(line.strip() for line in f if line.strip())
@@ -730,6 +745,11 @@ def main():
     if args.batch_limit:
         global BATCH_LIMIT
         BATCH_LIMIT = args.batch_limit
+    if args.use_profile:
+        print(f"Using browser profile: {args.use_profile}")
+        DAILY_LIMIT = 200
+        BATCH_LIMIT = 50
+        DELAY_SONG = 300
     if not artists:
         print("ERROR: At least one artist or a --file artist list is required, none left in queue.")
         sys.exit()
